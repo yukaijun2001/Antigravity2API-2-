@@ -135,7 +135,7 @@
 
 ### Docker
 
-#### Linux 服务器一键部署（端口 10005）
+#### Linux 服务器 Compose 一键部署（端口 10005）
 
 将本仓库的 `deploy.sh` 上传到服务器后执行：
 
@@ -143,13 +143,25 @@
 sudo bash deploy.sh
 ```
 
-支持 Debian、Ubuntu，以及使用 dnf/yum 的常见 Linux 发行版，架构为 amd64 或 arm64。脚本自动安装 Git、Docker、Buildx 与所需依赖，拉取 `https://github.com/yukaijun2001/Antigravity2API-2-.git` 的 `main` 分支最新代码，在容器中构建前后端并启动服务，无需手动安装 Go、Node.js 或编写 `.env`。
+支持 Debian、Ubuntu，以及使用 dnf/yum 的常见 Linux 发行版，架构为 amd64 或 arm64。脚本自动安装 Git、Docker、Compose、Buildx 与所需依赖，拉取 `https://github.com/yukaijun2001/Antigravity2API-2-.git` 的 `main` 分支最新代码，使用仓库中的 `compose.yaml` 构建前后端并编排服务，无需手动安装 Go、Node.js 或编写 `.env`。
 
 - 管理端：`http://服务器IP:10005`；OpenAI 兼容 API：`http://服务器IP:10005/v1`
 - 首次管理员为 `sys_wutong`，密码自动使用部署脚本中指定的初始密码；公开 API Key 自动随机生成，可在管理端的客户端接入页查看
 - 源码保存在 `/opt/antigravity2api/source`，配置、账户与运行数据保存在 `/opt/antigravity2api/data`，配置文件权限为 `0600`
+- 编排项目名和服务名均为 `antigravity2api`，实际运行的编排文件保存在 `/opt/antigravity2api/compose.yaml`，其中已固定绝对路径和当前镜像版本；应用配置通过挂载的 `data/.env` 读取，管理端修改后仍可保存
 - 容器随 Docker 启动自动恢复，日志自动轮转；脚本会为已启用的 UFW/firewalld 放行 TCP 10005，云厂商安全组仍需允许该端口
-- 再次运行同一命令即可更新：保留账户、API Key、管理端修改后的密码与设置；先构建新镜像再切换，启动检查失败时尝试恢复旧容器和配置（运行数据库不回滚）
+- 再次运行同一命令即可更新：保留账户、API Key、管理端修改后的密码与设置；先构建新镜像再切换，等待容器健康检查与管理 API 检查通过；失败时尝试恢复旧编排、实际运行的旧镜像和配置（运行数据库不回滚）
+- 已使用旧版 `deploy.sh` 部署时，执行新脚本会自动迁移到 Compose，并沿用 `/opt/antigravity2api/data`；迁移失败时尝试恢复原容器
+
+部署后的常用编排命令（更新源码与重新构建仍执行 `sudo bash deploy.sh`）：
+
+```bash
+sudo docker compose -f /opt/antigravity2api/compose.yaml ps
+sudo docker compose -f /opt/antigravity2api/compose.yaml logs -f --tail 100
+sudo docker compose -f /opt/antigravity2api/compose.yaml restart
+sudo docker compose -f /opt/antigravity2api/compose.yaml stop
+sudo docker compose -f /opt/antigravity2api/compose.yaml up -d --no-build --pull never
+```
 
 首次部署完成后，在管理端添加 Google 账户，或执行 `docker exec -it antigravity2api antigravity2api login --code`。服务器出口需要位于 Antigravity 支持的地区，需要代理时在管理端设置。
 

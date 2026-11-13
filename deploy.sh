@@ -8,12 +8,18 @@ BRANCH="${BRANCH:-main}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/antigravity2api}"
 HOST_PORT=10005
 CONTAINER_NAME=antigravity2api
+PROJECT_NAME=antigravity2api
+SERVICE_NAME=antigravity2api
 OWNER_LABEL=io.antigravity2api.deploy
 WORK_DIR=
 PREVIOUS_ID=
+PREVIOUS_KIND=none
 PREVIOUS_RUNNING=false
+ROLLBACK_IMAGE=
+KEEP_ROLLBACK_IMAGE=false
 REPLACING=false
 CONFIG_CHANGED=false
+COMPOSE_CHANGED=false
 SUCCEEDED=false
 
 log() { printf '\n[deploy] %s\n' "$*"; }
@@ -23,8 +29,9 @@ usage() {
   cat <<'EOF'
 用法：sudo bash deploy.sh
 
-自动安装 Git、Docker 和构建组件，拉取 main 最新源码，构建并部署到 10005 端口。
+自动安装 Git、Docker、Compose 和构建组件，拉取 main 最新源码，编排部署到 10005 端口。
 首次自动配置管理登录并生成 API Key；重复执行保留账户、密钥、管理密码与运行数据。
+自动迁移旧版 deploy.sh 创建的容器，编排文件保存到安装目录的 compose.yaml。
 
 可选环境变量（无需设置）：
   DEPLOY_DIR  安装目录，默认 /opt/antigravity2api
@@ -40,6 +47,15 @@ require_root() {
       bash "${BASH_SOURCE[0]}" "$@"
   fi
 }
+
+compose_file() {
+  local file=$1
+  shift
+  docker compose --ansi never --env-file /dev/null --project-name "$PROJECT_NAME" \
+    --project-directory "$DEPLOY_DIR" --file "$file" "$@"
+}
+
+compose() { compose_file "$COMPOSE_FILE" "$@"; }
 
 install_dependencies() {
   local dependency missing=false
@@ -103,6 +119,23 @@ ensure_docker() {
     fi
     docker buildx version >/dev/null 2>&1 || die '无法安装 Docker Buildx，未改动现有容器。'
   fi
+
+  if ! docker compose version >/dev/null 2>&1; then
+    log '安装 Docker Compose 编排组件'
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y docker-compose-plugin || dnf install -y docker-compose
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y docker-compose-plugin || yum install -y docker-compose
+    fi
+    docker compose version >/dev/null 2>&1 || die '无法安装 Docker Compose，未改动现有容器。'
+  fi
+  local compose_help
+  compose_help=$(docker compose up --help)
+  [[ $compose_help == *--wait-timeout* ]] || die 'Docker Compose 版本过旧，需要支持 up --wait-timeout 的版本。'
 }
 
 update_source() {
@@ -121,21 +154,56 @@ update_source() {
   else
     git clone --single-branch --branch "$BRANCH" "$REPO_URL" "$SOURCE_DIR"
   fi
-  [[ -f $SOURCE_DIR/Dockerfile && -f $SOURCE_DIR/.env.example ]] || \
-    die '仓库缺少 Dockerfile 或 .env.example。'
+  [[ -f $SOURCE_DIR/Dockerfile && -f $SOURCE_DIR/.env.example && -f $SOURCE_DIR/compose.yaml ]] || \
+    die '仓库缺少 Dockerfile、.env.example 或 compose.yaml。'
   COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
   IMAGE="antigravity2api:deploy-${COMMIT:0:12}"
 }
 
 check_existing_container() {
   if PREVIOUS_ID=$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null); then
-    local owner
+    local owner project service
     owner=$(docker container inspect --format "{{index .Config.Labels \"$OWNER_LABEL\"}}" "$CONTAINER_NAME")
     [[ $owner == "$DEPLOY_DIR" ]] || \
       die "已有同名容器 $CONTAINER_NAME 不属于此部署目录，未改动它。"
     PREVIOUS_RUNNING=$(docker container inspect --format '{{.State.Running}}' "$PREVIOUS_ID")
+    project=$(docker container inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$PREVIOUS_ID")
+    if [[ -z $project || $project == '<no value>' ]]; then
+      PREVIOUS_KIND=legacy
+    else
+      service=$(docker container inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$PREVIOUS_ID")
+      [[ $project == "$PROJECT_NAME" && $service == "$SERVICE_NAME" ]] || \
+        die '同名容器属于其他 Compose 项目或服务，未改动它。'
+      [[ -f $COMPOSE_FILE ]] || die "已有 Compose 容器但缺少原编排文件：$COMPOSE_FILE"
+      PREVIOUS_KIND=compose
+    fi
   else
     PREVIOUS_ID=
+  fi
+}
+
+prepare_compose() {
+  if [[ -f $COMPOSE_FILE ]]; then cp -p "$COMPOSE_FILE" "$WORK_DIR/previous-compose.yaml"; fi
+
+  # 在修改运行中的服务之前验证模板，并将绝对路径与镜像版本固化到部署目录。
+  ANTIGRAVITY_SOURCE_DIR="$SOURCE_DIR" ANTIGRAVITY_DATA_DIR="$DATA_DIR" \
+    ANTIGRAVITY_DEPLOY_DIR="$DEPLOY_DIR" ANTIGRAVITY_IMAGE="$IMAGE" \
+    compose_file "$SOURCE_DIR/compose.yaml" config >"$WORK_DIR/next-compose.yaml"
+
+  if [[ $PREVIOUS_KIND == compose ]]; then
+    local previous_image
+    previous_image=$(docker container inspect --format '{{.Image}}' "$PREVIOUS_ID")
+    ROLLBACK_IMAGE="antigravity2api:rollback-$(date +%s)-$$"
+    docker image tag "$previous_image" "$ROLLBACK_IMAGE"
+    python3 - "$ROLLBACK_IMAGE" "$WORK_DIR/rollback-image.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+Path(sys.argv[2]).write_text(json.dumps({"services": {"antigravity2api": {"image": sys.argv[1]}}}))
+PY
+    # 固定实际运行的旧镜像，同一提交重新构建时也能恢复。
+    compose --file "$WORK_DIR/rollback-image.json" config >"$WORK_DIR/rollback-compose.yaml"
   fi
 }
 
@@ -238,9 +306,8 @@ cleanup() {
   set +e
   if [[ $SUCCEEDED != true && $REPLACING == true ]]; then
     log '部署未完成，恢复原有配置与容器'
-    current_id=$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null)
-    if [[ -n $current_id && $current_id != "$PREVIOUS_ID" ]]; then
-      docker rm --force "$current_id" >/dev/null
+    if [[ $COMPOSE_CHANGED == true ]]; then
+      compose down --timeout 20 || log '新编排清理失败，请检查 Docker 状态。'
     fi
     if [[ $CONFIG_CHANGED == true ]]; then
       if [[ -f $WORK_DIR/previous.env ]]; then
@@ -249,12 +316,35 @@ cleanup() {
         rm -f "$ENV_FILE"
       fi
     fi
-    if [[ -n $PREVIOUS_ID ]]; then
+    if [[ $COMPOSE_CHANGED == true ]]; then
+      if [[ $PREVIOUS_KIND == compose ]]; then
+        cp -p "$WORK_DIR/rollback-compose.yaml" "$COMPOSE_FILE"
+        KEEP_ROLLBACK_IMAGE=true
+      elif [[ -f $WORK_DIR/previous-compose.yaml ]]; then
+        cp -p "$WORK_DIR/previous-compose.yaml" "$COMPOSE_FILE"
+      else
+        rm -f "$COMPOSE_FILE"
+      fi
+    fi
+    if [[ $PREVIOUS_KIND == legacy ]]; then
+      current_id=$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null)
       if [[ $current_id != "$PREVIOUS_ID" ]]; then
         docker rename "$PREVIOUS_ID" "$CONTAINER_NAME"
       fi
       if [[ $PREVIOUS_RUNNING == true ]]; then docker start "$PREVIOUS_ID" >/dev/null; fi
+    elif [[ $PREVIOUS_KIND == compose ]]; then
+      if [[ $COMPOSE_CHANGED != true ]]; then
+        if [[ $PREVIOUS_RUNNING == true ]]; then docker start "$PREVIOUS_ID" >/dev/null; fi
+      elif [[ $PREVIOUS_RUNNING == true ]]; then
+        compose up --detach --no-build --pull never --wait --wait-timeout 90 "$SERVICE_NAME" || \
+          log '旧编排恢复启动失败，请检查日志；原数据与恢复镜像已保留。'
+      else
+        compose create --no-build --pull never "$SERVICE_NAME" || log '旧编排恢复失败，请检查 Docker 状态。'
+      fi
     fi
+  fi
+  if [[ -n $ROLLBACK_IMAGE && $KEEP_ROLLBACK_IMAGE != true ]]; then
+    docker image rm "$ROLLBACK_IMAGE" >/dev/null 2>&1 || true
   fi
   if [[ -n $WORK_DIR ]]; then rm -rf -- "$WORK_DIR"; fi
   exit "$status"
@@ -271,9 +361,11 @@ show_result() {
   log '部署成功'
   printf '管理端：http://%s:%s\nAPI 地址：http://%s:%s/v1\n' "$address" "$HOST_PORT" "$address" "$HOST_PORT"
   printf '代码版本：%s\n配置文件：%s\n数据目录：%s\n' "$COMMIT" "$ENV_FILE" "$DATA_DIR"
+  printf '编排文件：%s\n' "$COMPOSE_FILE"
   printf '管理员：首次使用 sys_wutong 和指定密码，后续保留管理端修改。\n'
   printf 'API Key：已自动生成并保存，可在管理端「客户端接入」中查看。\n'
-  printf '查看日志：docker logs -f %s\n' "$CONTAINER_NAME"
+  printf '查看状态：sudo docker compose -f %q ps\n' "$COMPOSE_FILE"
+  printf '查看日志：sudo docker compose -f %q logs -f --tail 100\n' "$COMPOSE_FILE"
   printf '更新服务：再次执行 sudo bash deploy.sh\n'
   printf '首次使用请在管理端添加 Google 账户；云服务器安全组需允许 TCP %s。\n' "$HOST_PORT"
 }
@@ -294,6 +386,7 @@ main() {
   SOURCE_DIR="$DEPLOY_DIR/source"
   DATA_DIR="$DEPLOY_DIR/data"
   ENV_FILE="$DATA_DIR/.env"
+  COMPOSE_FILE="$DEPLOY_DIR/compose.yaml"
   exec 9>"$DEPLOY_DIR/.deploy.lock"
   flock --nonblock 9 || die '已有部署正在运行，请等待它完成。'
   WORK_DIR=$(mktemp -d "$DEPLOY_DIR/.deploy-XXXXXX")
@@ -306,38 +399,36 @@ main() {
   check_existing_container
   check_port
   update_source
+  prepare_compose
   log "构建 Docker 镜像：${COMMIT:0:12}（首次可能需要数分钟）"
-  docker buildx build --load --pull --progress plain --tag "$IMAGE" "$SOURCE_DIR"
+  compose_file "$WORK_DIR/next-compose.yaml" build --pull "$SERVICE_NAME"
   configure_firewall
 
   # 构建期间保留旧服务，只有构建成功后才切换。
   mkdir -p "$DATA_DIR"
   chmod 700 "$DATA_DIR"
   REPLACING=true
-  if [[ -n $PREVIOUS_ID ]]; then
+  if [[ $PREVIOUS_KIND == legacy ]]; then
+    log '迁移旧版容器到 Docker Compose'
     docker stop --time 20 "$PREVIOUS_ID" >/dev/null
     docker rename "$PREVIOUS_ID" "$CONTAINER_NAME-previous-$$"
+  elif [[ $PREVIOUS_KIND == compose ]]; then
+    compose stop --timeout 20 "$SERVICE_NAME"
   fi
   configure_app
-  log "启动服务：$HOST_PORT -> 8017"
-  local -a data_mount=(--mount "type=bind,src=$DATA_DIR,dst=/data")
-  if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce) != Disabled ]]; then
-    data_mount=(--volume "$DATA_DIR:/data:Z")
+  COMPOSE_CHANGED=true
+  mv "$WORK_DIR/next-compose.yaml" "$COMPOSE_FILE"
+  log "使用 Docker Compose 启动服务：$HOST_PORT -> 8017"
+  if ! compose up --detach --no-build --pull never --force-recreate --wait --wait-timeout 90 "$SERVICE_NAME"; then
+    compose logs --no-color --tail 80 "$SERVICE_NAME" >&2 || true
+    die 'Compose 启动或健康检查失败，尝试恢复原有部署。'
   fi
-  docker run --detach --name "$CONTAINER_NAME" \
-    --label "$OWNER_LABEL=$DEPLOY_DIR" \
-    --restart unless-stopped \
-    --publish "$HOST_PORT:8017" \
-    "${data_mount[@]}" \
-    --env TZ=Asia/Shanghai \
-    --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
-    --stop-timeout 20 "$IMAGE" >/dev/null
   if ! wait_ready; then
-    docker logs --tail 80 "$CONTAINER_NAME" >&2 || true
+    compose logs --no-color --tail 80 "$SERVICE_NAME" >&2 || true
     die '新容器未通过启动检查，尝试恢复旧容器；持久化数据会保留。'
   fi
   SUCCEEDED=true
-  if [[ -n $PREVIOUS_ID ]]; then
+  if [[ $PREVIOUS_KIND == legacy ]]; then
     docker rm "$PREVIOUS_ID" >/dev/null || log '旧容器清理失败，新服务已启动，可稍后手动清理旧容器。'
   fi
   show_result

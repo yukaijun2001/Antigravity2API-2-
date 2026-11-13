@@ -1,0 +1,30 @@
+name: antigravity2api
+
+services:
+  antigravity2api:
+    image: ${ANTIGRAVITY_IMAGE:-antigravity2api:local}
+    build:
+      context: ${ANTIGRAVITY_SOURCE_DIR:-.}
+      dockerfile: Dockerfile
+    container_name: antigravity2api
+    restart: unless-stopped
+    ports:
+      - "10005:8017"
+    volumes:
+      - "${ANTIGRAVITY_DATA_DIR:-./data}:/data:Z"
+    environment:
+      TZ: Asia/Shanghai
+    labels:
+      io.antigravity2api.deploy: ${ANTIGRAVITY_DEPLOY_DIR:-manual}
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "antigravity2api", "status", "--listen", "127.0.0.1:8017"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

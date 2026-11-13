@@ -1,4 +1,4 @@
-"""Exercise deployment updates and recovery without installing Docker on the host.
+"""Exercise deployment updates and recovery with Docker CLI, without a daemon.
 
 Run: python3 -m unittest discover -s tests -p 'test_deploy.py'
 """
@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -63,8 +65,74 @@ if tool != "docker":
     done(code=2)
 if args == ["info"] or args == ["buildx", "version"]:
     done("mock Docker")
-if args[:2] == ["buildx", "build"]:
-    done(code=1 if failure == "build" else 0)
+if args[:2] == ["compose", "version"]:
+    done("Docker Compose mock")
+if args[:2] == ["compose", "up"] and "--help" in args:
+    done("old Compose" if failure == "old-compose" else "--wait-timeout SECONDS")
+if args[0] == "compose":
+    commands = ("config", "build", "up", "down", "stop", "logs", "create")
+    offset = next(index for index, arg in enumerate(args) if arg in commands)
+    action = args[offset]
+    global_options = args[:offset]
+    if action == "config":
+        if failure == "config":
+            done("invalid Compose definition", code=1)
+        result = subprocess.run([os.environ["REAL_DOCKER"], *args], capture_output=True, text=True)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        done(result.stdout.rstrip(), result.returncode)
+    result = subprocess.run([os.environ["REAL_DOCKER"], *global_options, "config", "--format", "json"],
+                            capture_output=True, text=True)
+    if result.returncode:
+        print(result.stderr, file=sys.stderr)
+        done(code=result.returncode)
+    config = json.loads(result.stdout)
+    service = config["services"]["antigravity2api"]
+    image = service["image"]
+    if action == "build":
+        if failure == "build":
+            done(code=1)
+        state["image_sequence"] += 1
+        state["images"][image] = "sha256:image-" + str(state["image_sequence"])
+        done()
+    if action == "logs":
+        done("mock application startup failure")
+    if action == "stop":
+        for item in state["containers"]:
+            if item.get("project") == config["name"]:
+                item["running"] = False
+        done()
+    if action == "down":
+        state["containers"] = [item for item in state["containers"]
+                               if item.get("project") != config["name"]]
+        done()
+    if action in ("up", "create"):
+        # Compose replaces its own service, while a renamed legacy container
+        # without Compose labels remains available until migration succeeds.
+        state["containers"] = [item for item in state["containers"]
+                               if item.get("project") != config["name"]]
+        rollback = ":rollback-" in image
+        fails = failure in ("startup", "run") and not rollback
+        state["sequence"] += 1
+        item = {
+            "id": "container-" + str(state["sequence"]),
+            "name": service["container_name"],
+            "owner": service["labels"]["io.antigravity2api.deploy"],
+            "running": action == "up" and not fails,
+            "project": config["name"],
+            "service": "antigravity2api",
+            "image": state["images"][image],
+            "config": service,
+        }
+        state["containers"].append(item)
+        done(item["id"], code=1 if fails else 0)
+    done(code=2)
+if args[:2] == ["image", "tag"]:
+    state["images"][args[-1]] = state["images"].get(args[-2], args[-2])
+    done()
+if args[:2] == ["image", "rm"]:
+    state["images"].pop(args[-1], None)
+    done()
 if args[:2] == ["container", "inspect"]:
     item = container(args[-1])
     if not item:
@@ -74,6 +142,12 @@ if args[:2] == ["container", "inspect"]:
         done(item["id"])
     if template == "{{.State.Running}}":
         done(str(item["running"]).lower())
+    if template == "{{.Image}}":
+        done(item["image"])
+    if '"com.docker.compose.project"' in template:
+        done(item.get("project", ""))
+    if '"com.docker.compose.service"' in template:
+        done(item.get("service", ""))
     done(item["owner"])
 if args[0] == "stop":
     container(args[-1])["running"] = False
@@ -84,17 +158,6 @@ if args[0] == "rename":
         done(code=1)
     item["name"] = args[2]
     done()
-if args[0] == "run":
-    state["sequence"] += 1
-    item = {
-        "id": "container-" + str(state["sequence"]),
-        "name": args[args.index("--name") + 1],
-        "owner": args[args.index("--label") + 1].split("=", 1)[1],
-        "running": failure not in ("startup", "run"),
-        "args": args,
-    }
-    state["containers"].append(item)
-    done(item["id"], code=1 if failure == "run" else 0)
 if args[0] == "rm":
     item = container(args[-1])
     if not item:
@@ -111,6 +174,15 @@ done(code=2)
 
 
 class DeployTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.real_docker = shutil.which("docker")
+        if not cls.real_docker:
+            raise unittest.SkipTest("Docker CLI with Compose is required; no daemon needed")
+        probe = subprocess.run([cls.real_docker, "compose", "version"], capture_output=True)
+        if probe.returncode:
+            raise unittest.SkipTest("Docker Compose CLI is required; no daemon needed")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="antigravity-deploy-test-")
         self.addCleanup(self.temporary.cleanup)
@@ -119,10 +191,13 @@ class DeployTests(unittest.TestCase):
         self.remote.mkdir()
         self.install = self.root / "deployment with spaces"
         self.state_file = self.root / "docker.json"
-        self.state_file.write_text(json.dumps({"calls": [], "containers": [], "sequence": 0}))
+        self.state_file.write_text(json.dumps({
+            "calls": [], "containers": [], "sequence": 0, "images": {}, "image_sequence": 0,
+        }))
         self.git(self.remote, "init", "--initial-branch=main")
         (self.remote / "Dockerfile").write_text("FROM scratch\n")
         (self.remote / ".env.example").write_text((PROJECT / ".env.example").read_text())
+        (self.remote / "compose.yaml").write_text((PROJECT / "compose.yaml").read_text())
         self.commit("Initial source")
 
         commands = self.root / "commands"
@@ -141,6 +216,7 @@ class DeployTests(unittest.TestCase):
             REPO_URL=str(self.remote),
             BRANCH="main",
             MOCK_STATE=str(self.state_file),
+            REAL_DOCKER=self.real_docker,
         )
 
     def git(self, directory, *args):
@@ -188,6 +264,24 @@ check_port() { :; }
                 result[key] = json.loads(raw) if raw.startswith('"') else raw
         return result
 
+    def seed_legacy_container(self, running=True):
+        self.env_file.parent.mkdir(parents=True)
+        self.env_file.write_text(
+            'LISTEN=0.0.0.0:8017\nADMIN_AUTH_ENABLED=true\n'
+            'ADMIN_USERNAME=legacy_admin\nADMIN_PASSWORD="legacy secret"\nAPI_KEYS=legacy-key\n'
+        )
+        account = self.env_file.parent / "auth" / "account.json"
+        account.parent.mkdir()
+        account.write_text("legacy account")
+        existing = {
+            "id": "legacy-id", "name": "antigravity2api", "running": running,
+            "owner": str(self.install.resolve()), "image": "sha256:legacy-image",
+        }
+        state = self.state()
+        state["containers"].append(existing)
+        self.state_file.write_text(json.dumps(state))
+        return existing
+
     def test_first_deploy_configures_credentials_port_and_persistence(self):
         result = self.deploy()
         values = self.values()
@@ -200,9 +294,19 @@ check_port() { :; }
         self.assertEqual(self.env_file.parent.stat().st_mode & 0o777, 0o700)
         container = self.state()["containers"][0]
         self.assertTrue(container["running"])
-        self.assertIn("10005:8017", container["args"])
-        self.assertIn("unless-stopped", container["args"])
-        self.assertIn(f"type=bind,src={self.install.resolve()}/data,dst=/data", container["args"])
+        service = container["config"]
+        self.assertEqual(container["project"], "antigravity2api")
+        self.assertEqual(service["ports"][0]["published"], "10005")
+        self.assertEqual(service["ports"][0]["target"], 8017)
+        self.assertEqual(service["restart"], "unless-stopped")
+        self.assertEqual(service["logging"]["options"], {"max-size": "10m", "max-file": "3"})
+        self.assertEqual(service["volumes"][0]["source"], f"{self.install.resolve()}/data")
+        self.assertEqual(service["volumes"][0]["target"], "/data")
+        self.assertEqual(service["healthcheck"]["test"],
+                         ["CMD", "antigravity2api", "status", "--listen", "127.0.0.1:8017"])
+        self.assertTrue((self.install / "compose.yaml").is_file())
+        self.assertEqual(service["environment"], {"TZ": "Asia/Shanghai"})
+        self.assertFalse(any(call[:2] == ["docker", "run"] for call in self.state()["calls"]))
         self.assertNotIn(values["API_KEYS"], result.stdout + result.stderr)
         self.assertNotIn(values["ADMIN_PASSWORD"], result.stdout + result.stderr)
         self.assertFalse(list(self.install.glob(".deploy-*")))
@@ -243,9 +347,12 @@ check_port() { :; }
         self.deploy()
         old_container = self.state()["containers"][0]
         old_config = self.env_file.read_bytes()
+        old_compose = (self.install / "compose.yaml").read_bytes()
         result = self.deploy(failure="build", expected=1)
         self.assertEqual(self.state()["containers"], [old_container])
         self.assertEqual(self.env_file.read_bytes(), old_config)
+        self.assertEqual((self.install / "compose.yaml").read_bytes(), old_compose)
+        self.assertFalse(any(":rollback-" in tag for tag in self.state()["images"]))
         self.assertNotIn("部署成功", result.stdout)
 
     def test_failed_replacement_restores_old_container_and_config(self):
@@ -257,7 +364,12 @@ check_port() { :; }
                     output.write("ADMIN_AUTH_ENABLED=false\n")
                 old_config = self.env_file.read_bytes()
                 result = self.deploy(failure=failure, expected=1)
-                self.assertEqual(self.state()["containers"], [old_container])
+                restored = self.state()["containers"]
+                self.assertEqual(len(restored), 1)
+                self.assertTrue(restored[0]["running"])
+                self.assertEqual(restored[0]["image"], old_container["image"])
+                self.assertEqual(restored[0]["project"], old_container["project"])
+                self.assertIn(":rollback-", restored[0]["config"]["image"])
                 self.assertEqual(self.env_file.read_bytes(), old_config)
                 self.assertNotIn("部署成功", result.stdout)
                 self.assertFalse(list(self.install.glob(".deploy-*")))
@@ -267,6 +379,52 @@ check_port() { :; }
         self.assertEqual(self.state()["containers"], [])
         self.assertFalse(self.env_file.exists())
         self.assertTrue(self.env_file.parent.exists())
+        self.assertFalse((self.install / "compose.yaml").exists())
+
+    def test_legacy_deployment_is_migrated_without_changing_credentials_or_accounts(self):
+        self.seed_legacy_container()
+        self.deploy()
+        self.assertEqual(len(self.state()["containers"]), 1)
+        self.assertEqual(self.state()["containers"][0]["project"], "antigravity2api")
+        self.assertEqual(self.values()["ADMIN_USERNAME"], "legacy_admin")
+        self.assertEqual(self.values()["ADMIN_PASSWORD"], "legacy secret")
+        self.assertEqual(self.values()["API_KEYS"], "legacy-key")
+        self.assertEqual((self.env_file.parent / "auth" / "account.json").read_text(), "legacy account")
+        self.assertTrue((self.install / "compose.yaml").exists())
+
+    def test_failed_migration_restores_original_legacy_container_and_credentials(self):
+        old_container = self.seed_legacy_container()
+        old_config = self.env_file.read_bytes()
+        self.deploy(failure="startup", expected=1)
+        self.assertEqual(self.state()["containers"], [old_container])
+        self.assertEqual(self.env_file.read_bytes(), old_config)
+        self.assertFalse((self.install / "compose.yaml").exists())
+
+    def test_failed_update_preserves_previously_stopped_service(self):
+        self.deploy()
+        state = self.state()
+        state["containers"][0]["running"] = False
+        old_image = state["containers"][0]["image"]
+        self.state_file.write_text(json.dumps(state))
+        self.deploy(failure="startup", expected=1)
+        self.assertEqual(len(self.state()["containers"]), 1)
+        self.assertFalse(self.state()["containers"][0]["running"])
+        self.assertEqual(self.state()["containers"][0]["image"], old_image)
+
+    def test_invalid_compose_definition_leaves_existing_service_untouched(self):
+        self.deploy()
+        old_container = self.state()["containers"][0]
+        old_config = self.env_file.read_bytes()
+        old_compose = (self.install / "compose.yaml").read_bytes()
+        self.deploy(failure="config", expected=1)
+        self.assertEqual(self.state()["containers"], [old_container])
+        self.assertEqual(self.env_file.read_bytes(), old_config)
+        self.assertEqual((self.install / "compose.yaml").read_bytes(), old_compose)
+
+    def test_old_compose_version_is_rejected_before_source_or_container_changes(self):
+        self.deploy(failure="old-compose", expected=1)
+        self.assertFalse((self.install / "source").exists())
+        self.assertEqual(self.state()["containers"], [])
 
     def test_foreign_container_is_not_replaced(self):
         state = self.state()
@@ -300,8 +458,9 @@ check_port() { :; }
     def test_selinux_host_labels_data_for_container_access(self):
         self.environment["MOCK_SELINUX"] = "1"
         self.deploy()
-        self.assertIn(f"{self.install.resolve()}/data:/data:Z",
-                      self.state()["containers"][0]["args"])
+        volume = self.state()["containers"][0]["config"]["volumes"][0]
+        self.assertEqual(volume["source"], f"{self.install.resolve()}/data")
+        self.assertEqual(volume["bind"]["selinux"], "Z")
 
     def test_concurrent_deployment_exits_before_touching_service(self):
         self.deploy()
