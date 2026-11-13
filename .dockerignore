@@ -1,5 +1,7 @@
 web/node_modules
 internal/webui/dist
+.git
+data
 auth
 runtime
 .env

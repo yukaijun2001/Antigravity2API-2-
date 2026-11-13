@@ -135,6 +135,32 @@ The Accounts page of the server's admin UI can also start an authorization code 
 
 ### Docker
 
+#### One-command Linux server deployment (port 10005)
+
+Upload this repository's `deploy.sh` to the server and run:
+
+```bash
+sudo bash deploy.sh
+```
+
+The script supports Debian, Ubuntu and common dnf/yum-based Linux distributions on amd64 and arm64. It installs Git, Docker, Buildx and the required dependencies, fetches the latest `main` from `https://github.com/yukaijun2001/Antigravity2API-2-.git`, builds the frontend and backend in Docker, and starts the service without manually installing Go or Node.js or creating an `.env` file.
+
+- Admin UI: `http://SERVER_IP:10005`; OpenAI-compatible API: `http://SERVER_IP:10005/v1`
+- Initial administrator: `sys_wutong`, with the initial password specified in the script. A random API key is generated automatically and can be viewed on the admin UI's client connection page
+- Source: `/opt/antigravity2api/source`; configuration, accounts and runtime data: `/opt/antigravity2api/data`; configuration file permissions: `0600`
+- The container restarts with Docker and rotates its logs. Active UFW/firewalld rules are configured for TCP 10005; cloud security groups must also allow this port
+- Run the command again to update while keeping accounts, API keys, changed admin credentials and settings. The old service runs during the build; if the new container fails its startup check, the script attempts to restore the old container and configuration (runtime databases are not rolled back)
+
+After deployment, add a Google account through the admin UI or run `docker exec -it antigravity2api antigravity2api login --code`. The server's outbound connection must be in a region supported by Antigravity; configure a proxy in the admin UI when needed.
+
+Optional overrides, with no configuration required for the default deployment:
+
+```bash
+sudo env DEPLOY_DIR=/opt/antigravity2api REPO_URL=https://github.com/yukaijun2001/Antigravity2API-2-.git BRANCH=main bash deploy.sh
+```
+
+#### Prebuilt image
+
 ```bash
 docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
 ```

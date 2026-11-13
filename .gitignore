@@ -11,6 +11,7 @@
 
 # 本地配置与运行状态
 .env
+/data/
 /auth/
 /runtime/
 *.log
