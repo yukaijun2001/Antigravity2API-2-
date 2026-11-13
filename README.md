@@ -165,6 +165,15 @@ sudo docker compose -f /opt/antigravity2api/compose.yaml up -d --no-build --pull
 
 首次部署完成后，在管理端添加 Google 账户，或执行 `docker exec -it antigravity2api antigravity2api login --code`。服务器出口需要位于 Antigravity 支持的地区，需要代理时在管理端设置。
 
+编排明确以 `/data` 为工作目录，部署脚本自动创建 `data/auth` 与 `data/runtime`，并将容器中的 `AUTH_DIR`、`RUNTIME_DIR` 写为绝对路径；已有自定义目录保留原位置。账户库在启动时固定绝对路径并创建目录，避免后续保存凭据依赖进程的当前目录。
+
+粘贴授权码后若出现 `mkdir auth: no such file or directory`，表示 Google token 交换已完成，但本地账户保存失败；单纯未创建 `auth/` 会由程序自动补齐。检查工作目录与挂载是否失效，更新部署后在管理端点“重新开始”获取新授权码，旧码已经用于 token 交换，不能重复使用。可以先查看容器的实际工作目录与挂载：
+
+```bash
+sudo docker inspect antigravity2api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
+sudo docker exec -w /data antigravity2api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
+```
+
 默认配置即可运行，也可以通过环境变量指定部署目录、仓库和分支：
 
 ```bash

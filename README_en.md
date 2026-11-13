@@ -165,6 +165,15 @@ sudo docker compose -f /opt/antigravity2api/compose.yaml up -d --no-build --pull
 
 After deployment, add a Google account through the admin UI or run `docker exec -it antigravity2api antigravity2api login --code`. The server's outbound connection must be in a region supported by Antigravity; configure a proxy in the admin UI when needed.
 
+Compose explicitly sets `/data` as the working directory. The deployment script creates `data/auth` and `data/runtime` and writes absolute `AUTH_DIR` and `RUNTIME_DIR` paths, preserving the location of existing custom directories. The account store resolves its absolute path and creates the directory at startup, so later credential writes do not depend on the process's current directory.
+
+If pasting an authorization code produces `mkdir auth: no such file or directory`, the Google token exchange has already completed, but saving the account locally has failed. A missing `auth/` directory alone is created automatically. Check for a stale working directory or invalid mount, update the deployment, and restart the sign-in flow to obtain a new code; a code already exchanged for tokens cannot be reused. Inspect the container's actual working directory and mounts with:
+
+```bash
+sudo docker inspect antigravity2api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
+sudo docker exec -w /data antigravity2api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
+```
+
 Optional overrides, with no configuration required for the default deployment:
 
 ```bash

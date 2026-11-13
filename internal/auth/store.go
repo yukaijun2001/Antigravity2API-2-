@@ -75,15 +75,21 @@ type Store struct {
 	tokens   map[string]*oauth2.Token
 }
 
-// Open 加载 dir 下各子目录的 account.json 与 token.json，目录不存在时返回空账户库
+// Open 固定账户目录的绝对路径并创建目录，然后加载各子目录的 account.json 与 token.json。
+// 提前报告目录不可用，避免用户完成 OAuth 后才发现账户无法保存。
 func Open(dir string, proxy antigravity.Proxy) (*Store, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("解析账户目录 %q: %w", dir, err)
+	}
+	dir = absolute
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("创建账户目录 %q: %w", dir, err)
+	}
 	store := &Store{dir: dir, proxy: proxy, accounts: make(map[string]Account), tokens: make(map[string]*oauth2.Token)}
 	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return store, nil
-	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取账户目录 %q: %w", dir, err)
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {

@@ -7,6 +7,7 @@ services:
       context: ${ANTIGRAVITY_SOURCE_DIR:-.}
       dockerfile: Dockerfile
     container_name: antigravity2api
+    working_dir: /data
     restart: unless-stopped
     ports:
       - "10005:8017"

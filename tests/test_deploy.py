@@ -289,6 +289,10 @@ check_port() { :; }
         self.assertEqual(values["ADMIN_PASSWORD"], "f3RggbXHH6d5T8UKKakg")
         self.assertEqual(values["ADMIN_AUTH_ENABLED"], "true")
         self.assertEqual(values["LISTEN"], "0.0.0.0:8017")
+        self.assertEqual(values["AUTH_DIR"], "/data/auth")
+        self.assertEqual(values["RUNTIME_DIR"], "/data/runtime")
+        for directory in ("auth", "runtime"):
+            self.assertTrue((self.env_file.parent / directory).is_dir())
         self.assertRegex(values["API_KEYS"], r"^sk-[0-9a-f]{48}$")
         self.assertEqual(self.env_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.env_file.parent.stat().st_mode & 0o777, 0o700)
@@ -299,6 +303,7 @@ check_port() { :; }
         self.assertEqual(service["ports"][0]["published"], "10005")
         self.assertEqual(service["ports"][0]["target"], 8017)
         self.assertEqual(service["restart"], "unless-stopped")
+        self.assertEqual(service["working_dir"], "/data")
         self.assertEqual(service["logging"]["options"], {"max-size": "10m", "max-file": "3"})
         self.assertEqual(service["volumes"][0]["source"], f"{self.install.resolve()}/data")
         self.assertEqual(service["volumes"][0]["target"], "/data")
@@ -326,10 +331,10 @@ check_port() { :; }
             for key, value in settings.items():
                 output.write(f"{key}={json.dumps(value)}\n")
         account = self.install / "data" / "auth" / "account.json"
-        account.parent.mkdir()
+        account.parent.mkdir(exist_ok=True)
         account.write_text("existing account")
         runtime = self.install / "data" / "runtime" / "requests.db"
-        runtime.parent.mkdir()
+        runtime.parent.mkdir(exist_ok=True)
         runtime.write_bytes(b"existing runtime data")
         (self.remote / "version.txt").write_text("next version")
         self.commit("Next version")
@@ -342,6 +347,14 @@ check_port() { :; }
         self.assertEqual(runtime.read_bytes(), b"existing runtime data")
         self.assertEqual(len(self.state()["containers"]), 1)
         self.assertNotEqual(self.state()["containers"][0]["id"], old_id)
+
+    def test_existing_custom_data_directories_keep_their_original_location(self):
+        self.deploy()
+        with self.env_file.open("a") as output:
+            output.write('AUTH_DIR="accounts/custom"\nRUNTIME_DIR="/data/records"\n')
+        self.deploy()
+        self.assertEqual(self.values()["AUTH_DIR"], "/data/accounts/custom")
+        self.assertEqual(self.values()["RUNTIME_DIR"], "/data/records")
 
     def test_build_failure_keeps_old_service_and_config(self):
         self.deploy()

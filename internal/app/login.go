@@ -179,6 +179,8 @@ func (l *logins) run(ctx context.Context, item *login, mode string, links chan<-
 		var added *auth.Account
 		if added, err = l.server.deps.Store.AddWithDevice(l.server.ctx, token, item.device); err == nil {
 			id = added.ID
+		} else {
+			err = fmt.Errorf("Google 授权已完成，但保存账户失败，请检查账户目录和数据挂载: %w", err)
 		}
 	}
 	l.finish(item, id, err)

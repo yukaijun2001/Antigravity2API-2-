@@ -228,6 +228,7 @@ configure_app() {
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import secrets
 import sys
@@ -250,6 +251,8 @@ def value(key):
 
 updates = {
     "LISTEN": "0.0.0.0:8017",
+    "AUTH_DIR": posixpath.normpath(posixpath.join("/data", value("AUTH_DIR") or "auth")),
+    "RUNTIME_DIR": posixpath.normpath(posixpath.join("/data", value("RUNTIME_DIR") or "runtime")),
     "ADMIN_AUTH_ENABLED": "true",
     "ADMIN_USERNAME": value("ADMIN_USERNAME") if target.exists() else "sys_wutong",
     "ADMIN_PASSWORD": value("ADMIN_PASSWORD") or "f3RggbXHH6d5T8UKKakg",
@@ -405,8 +408,8 @@ main() {
   configure_firewall
 
   # 构建期间保留旧服务，只有构建成功后才切换。
-  mkdir -p "$DATA_DIR"
-  chmod 700 "$DATA_DIR"
+  mkdir -p "$DATA_DIR/auth" "$DATA_DIR/runtime"
+  chmod 700 "$DATA_DIR" "$DATA_DIR/auth" "$DATA_DIR/runtime"
   REPLACING=true
   if [[ $PREVIOUS_KIND == legacy ]]; then
     log '迁移旧版容器到 Docker Compose'
