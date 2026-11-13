@@ -148,10 +148,10 @@ The script supports Debian, Ubuntu and common dnf/yum-based Linux distributions 
 - Admin UI: `http://SERVER_IP:10005`; OpenAI-compatible API: `http://SERVER_IP:10005/v1`
 - Initial administrator: `sys_wutong`, with the initial password specified in the script. A random API key is generated automatically and can be viewed on the admin UI's client connection page
 - Source: `/opt/antigravity2api/source`; configuration, accounts and runtime data: `/opt/antigravity2api/data`; configuration file permissions: `0600`
-- Compose project and service: `antigravity2api`; the active definition is saved to `/opt/antigravity2api/compose.yaml` with absolute paths and the deployed image tag. Application settings are read from the mounted `data/.env`, so admin UI changes can still be saved
+- Container name: `antigravity-to-api`; Compose project and service: `antigravity2api`; the active definition is saved to `/opt/antigravity2api/compose.yaml` with absolute paths and the deployed image tag. Application settings are read from the mounted `data/.env`, so admin UI changes can still be saved
 - The container restarts with Docker and rotates its logs. Active UFW/firewalld rules are configured for TCP 10005; cloud security groups must also allow this port
 - Run the command again to update while keeping accounts, API keys, changed admin credentials and settings. The old service runs during the build. The script waits for container health and admin API checks; on failure, it attempts to restore the previous Compose definition, actual running image and configuration (runtime databases are not rolled back)
-- Deployments created by the previous `deploy.sh` are migrated to Compose automatically using the same `/opt/antigravity2api/data`; if migration fails, the script attempts to restore the original container
+- Deployments created by the previous `deploy.sh` are migrated to Compose automatically, replacing the old container `antigravity2api` with `antigravity-to-api` and using the same `/opt/antigravity2api/data`; if migration fails, the script attempts to restore the original container name and configuration
 
 Common commands after deployment (run `sudo bash deploy.sh` to fetch source updates and rebuild):
 
@@ -163,15 +163,15 @@ sudo docker compose -f /opt/antigravity2api/compose.yaml stop
 sudo docker compose -f /opt/antigravity2api/compose.yaml up -d --no-build --pull never
 ```
 
-After deployment, add a Google account through the admin UI or run `docker exec -it antigravity2api antigravity2api login --code`. The server's outbound connection must be in a region supported by Antigravity; configure a proxy in the admin UI when needed.
+After deployment, add a Google account through the admin UI or run `docker exec -it antigravity-to-api antigravity2api login --code`. The server's outbound connection must be in a region supported by Antigravity; configure a proxy in the admin UI when needed.
 
 Compose explicitly sets `/data` as the working directory. The deployment script creates `data/auth` and `data/runtime` and writes absolute `AUTH_DIR` and `RUNTIME_DIR` paths, preserving the location of existing custom directories. The account store resolves its absolute path and creates the directory at startup, so later credential writes do not depend on the process's current directory.
 
 If pasting an authorization code produces `mkdir auth: no such file or directory`, the Google token exchange has already completed, but saving the account locally has failed. A missing `auth/` directory alone is created automatically. Check for a stale working directory or invalid mount, update the deployment, and restart the sign-in flow to obtain a new code; a code already exchanged for tokens cannot be reused. Inspect the container's actual working directory and mounts with:
 
 ```bash
-sudo docker inspect antigravity2api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
-sudo docker exec -w /data antigravity2api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
+sudo docker inspect antigravity-to-api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
+sudo docker exec -w /data antigravity-to-api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
 ```
 
 Optional overrides, with no configuration required for the default deployment:
@@ -183,10 +183,10 @@ sudo env DEPLOY_DIR=/opt/antigravity2api REPO_URL=https://github.com/yukaijun200
 #### Prebuilt image
 
 ```bash
-docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
+docker run -d --name antigravity-to-api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
 ```
 
-`latest` points to the latest stable release; use a `v<version>` tag to pin a version. The image works in `/data`; `.env`, `auth/` and `runtime/` are stored in the mounted directory, and the container listens on `0.0.0.0:8017`. Set `API_KEYS` when the port is reachable from outside; opening the admin UI from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`. Add accounts with the authorization code sign-in of the admin UI, by remote pairing, with `docker exec -it antigravity2api antigravity2api login --code`, or by copying `auth/<email>/` from another computer into `data/auth/`; the running service loads new accounts within 2 seconds.
+`latest` points to the latest stable release; use a `v<version>` tag to pin a version. The image works in `/data`; `.env`, `auth/` and `runtime/` are stored in the mounted directory, and the container listens on `0.0.0.0:8017`. Set `API_KEYS` when the port is reachable from outside; opening the admin UI from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`. Add accounts with the authorization code sign-in of the admin UI, by remote pairing, with `docker exec -it antigravity-to-api antigravity2api login --code`, or by copying `auth/<email>/` from another computer into `data/auth/`; the running service loads new accounts within 2 seconds.
 
 ### Proxy
 

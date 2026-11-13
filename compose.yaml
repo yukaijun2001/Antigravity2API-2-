@@ -6,7 +6,7 @@ services:
     build:
       context: ${ANTIGRAVITY_SOURCE_DIR:-.}
       dockerfile: Dockerfile
-    container_name: antigravity2api
+    container_name: antigravity-to-api
     working_dir: /data
     restart: unless-stopped
     ports:

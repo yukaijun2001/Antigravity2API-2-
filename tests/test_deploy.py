@@ -298,7 +298,9 @@ check_port() { :; }
         self.assertEqual(self.env_file.parent.stat().st_mode & 0o777, 0o700)
         container = self.state()["containers"][0]
         self.assertTrue(container["running"])
+        self.assertEqual(container["name"], "antigravity-to-api")
         service = container["config"]
+        self.assertEqual(service["container_name"], "antigravity-to-api")
         self.assertEqual(container["project"], "antigravity2api")
         self.assertEqual(service["ports"][0]["published"], "10005")
         self.assertEqual(service["ports"][0]["target"], 8017)
@@ -398,6 +400,7 @@ check_port() { :; }
         self.seed_legacy_container()
         self.deploy()
         self.assertEqual(len(self.state()["containers"]), 1)
+        self.assertEqual(self.state()["containers"][0]["name"], "antigravity-to-api")
         self.assertEqual(self.state()["containers"][0]["project"], "antigravity2api")
         self.assertEqual(self.values()["ADMIN_USERNAME"], "legacy_admin")
         self.assertEqual(self.values()["ADMIN_PASSWORD"], "legacy secret")
@@ -408,10 +411,46 @@ check_port() { :; }
     def test_failed_migration_restores_original_legacy_container_and_credentials(self):
         old_container = self.seed_legacy_container()
         old_config = self.env_file.read_bytes()
-        self.deploy(failure="startup", expected=1)
+        result = self.deploy(failure="startup", expected=1)
+        self.assertIn("Compose 启动或健康检查失败", result.stderr)
         self.assertEqual(self.state()["containers"], [old_container])
         self.assertEqual(self.env_file.read_bytes(), old_config)
         self.assertFalse((self.install / "compose.yaml").exists())
+
+    def seed_old_compose_name(self):
+        self.deploy()
+        compose_file = self.install / "compose.yaml"
+        compose_file.write_text(compose_file.read_text().replace(
+            "container_name: antigravity-to-api", "container_name: antigravity2api",
+        ))
+        state = self.state()
+        state["containers"][0]["name"] = "antigravity2api"
+        state["containers"][0]["config"]["container_name"] = "antigravity2api"
+        self.state_file.write_text(json.dumps(state))
+        return state["containers"][0]
+
+    def test_old_compose_container_is_replaced_with_new_name(self):
+        old_container = self.seed_old_compose_name()
+        old_settings = self.values()
+        self.deploy()
+        containers = self.state()["containers"]
+        self.assertEqual(len(containers), 1)
+        self.assertEqual(containers[0]["name"], "antigravity-to-api")
+        self.assertNotEqual(containers[0]["id"], old_container["id"])
+        self.assertEqual(self.values(), old_settings)
+        self.assertEqual(containers[0]["config"]["volumes"], old_container["config"]["volumes"])
+
+    def test_failed_rename_restores_old_compose_name_and_image(self):
+        old_container = self.seed_old_compose_name()
+        old_settings = self.env_file.read_bytes()
+        result = self.deploy(failure="startup", expected=1)
+        self.assertIn("Compose 启动或健康检查失败", result.stderr)
+        containers = self.state()["containers"]
+        self.assertEqual(len(containers), 1)
+        self.assertEqual(containers[0]["name"], "antigravity2api")
+        self.assertEqual(containers[0]["image"], old_container["image"])
+        self.assertTrue(containers[0]["running"])
+        self.assertEqual(self.env_file.read_bytes(), old_settings)
 
     def test_failed_update_preserves_previously_stopped_service(self):
         self.deploy()
@@ -441,7 +480,7 @@ check_port() { :; }
 
     def test_foreign_container_is_not_replaced(self):
         state = self.state()
-        existing = {"id": "foreign", "name": "antigravity2api", "running": True, "owner": "other"}
+        existing = {"id": "foreign", "name": "antigravity-to-api", "running": True, "owner": "other"}
         state["containers"].append(existing)
         self.state_file.write_text(json.dumps(state))
         self.deploy(expected=1)

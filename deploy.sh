@@ -7,12 +7,14 @@ REPO_URL="${REPO_URL:-https://github.com/yukaijun2001/Antigravity2API-2-.git}"
 BRANCH="${BRANCH:-main}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/antigravity2api}"
 HOST_PORT=10005
-CONTAINER_NAME=antigravity2api
+CONTAINER_NAME=antigravity-to-api
+OLD_CONTAINER_NAME=antigravity2api
 PROJECT_NAME=antigravity2api
 SERVICE_NAME=antigravity2api
 OWNER_LABEL=io.antigravity2api.deploy
 WORK_DIR=
 PREVIOUS_ID=
+PREVIOUS_NAME=
 PREVIOUS_KIND=none
 PREVIOUS_RUNNING=false
 ROLLBACK_IMAGE=
@@ -161,11 +163,18 @@ update_source() {
 }
 
 check_existing_container() {
-  if PREVIOUS_ID=$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null); then
+  local candidate
+  for candidate in "$CONTAINER_NAME" "$OLD_CONTAINER_NAME"; do
+    if PREVIOUS_ID=$(docker container inspect --format '{{.Id}}' "$candidate" 2>/dev/null); then
+      PREVIOUS_NAME=$candidate
+      break
+    fi
+  done
+  if [[ -n $PREVIOUS_ID ]]; then
     local owner project service
-    owner=$(docker container inspect --format "{{index .Config.Labels \"$OWNER_LABEL\"}}" "$CONTAINER_NAME")
+    owner=$(docker container inspect --format "{{index .Config.Labels \"$OWNER_LABEL\"}}" "$PREVIOUS_ID")
     [[ $owner == "$DEPLOY_DIR" ]] || \
-      die "已有同名容器 $CONTAINER_NAME 不属于此部署目录，未改动它。"
+      die "已有容器 $PREVIOUS_NAME 不属于此部署目录，未改动它。"
     PREVIOUS_RUNNING=$(docker container inspect --format '{{.State.Running}}' "$PREVIOUS_ID")
     project=$(docker container inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$PREVIOUS_ID")
     if [[ -z $project || $project == '<no value>' ]]; then
@@ -330,9 +339,9 @@ cleanup() {
       fi
     fi
     if [[ $PREVIOUS_KIND == legacy ]]; then
-      current_id=$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null)
+      current_id=$(docker container inspect --format '{{.Id}}' "$PREVIOUS_NAME" 2>/dev/null)
       if [[ $current_id != "$PREVIOUS_ID" ]]; then
-        docker rename "$PREVIOUS_ID" "$CONTAINER_NAME"
+        docker rename "$PREVIOUS_ID" "$PREVIOUS_NAME"
       fi
       if [[ $PREVIOUS_RUNNING == true ]]; then docker start "$PREVIOUS_ID" >/dev/null; fi
     elif [[ $PREVIOUS_KIND == compose ]]; then
@@ -365,6 +374,7 @@ show_result() {
   printf '管理端：http://%s:%s\nAPI 地址：http://%s:%s/v1\n' "$address" "$HOST_PORT" "$address" "$HOST_PORT"
   printf '代码版本：%s\n配置文件：%s\n数据目录：%s\n' "$COMMIT" "$ENV_FILE" "$DATA_DIR"
   printf '编排文件：%s\n' "$COMPOSE_FILE"
+  printf '容器名称：%s\n' "$CONTAINER_NAME"
   printf '管理员：首次使用 sys_wutong 和指定密码，后续保留管理端修改。\n'
   printf 'API Key：已自动生成并保存，可在管理端「客户端接入」中查看。\n'
   printf '查看状态：sudo docker compose -f %q ps\n' "$COMPOSE_FILE"
@@ -414,7 +424,7 @@ main() {
   if [[ $PREVIOUS_KIND == legacy ]]; then
     log '迁移旧版容器到 Docker Compose'
     docker stop --time 20 "$PREVIOUS_ID" >/dev/null
-    docker rename "$PREVIOUS_ID" "$CONTAINER_NAME-previous-$$"
+    docker rename "$PREVIOUS_ID" "$PREVIOUS_NAME-previous-$$"
   elif [[ $PREVIOUS_KIND == compose ]]; then
     compose stop --timeout 20 "$SERVICE_NAME"
   fi

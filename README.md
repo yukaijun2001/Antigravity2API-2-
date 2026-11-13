@@ -148,10 +148,10 @@ sudo bash deploy.sh
 - 管理端：`http://服务器IP:10005`；OpenAI 兼容 API：`http://服务器IP:10005/v1`
 - 首次管理员为 `sys_wutong`，密码自动使用部署脚本中指定的初始密码；公开 API Key 自动随机生成，可在管理端的客户端接入页查看
 - 源码保存在 `/opt/antigravity2api/source`，配置、账户与运行数据保存在 `/opt/antigravity2api/data`，配置文件权限为 `0600`
-- 编排项目名和服务名均为 `antigravity2api`，实际运行的编排文件保存在 `/opt/antigravity2api/compose.yaml`，其中已固定绝对路径和当前镜像版本；应用配置通过挂载的 `data/.env` 读取，管理端修改后仍可保存
+- 容器名为 `antigravity-to-api`；编排项目名和服务名均为 `antigravity2api`，实际运行的编排文件保存在 `/opt/antigravity2api/compose.yaml`，其中已固定绝对路径和当前镜像版本；应用配置通过挂载的 `data/.env` 读取，管理端修改后仍可保存
 - 容器随 Docker 启动自动恢复，日志自动轮转；脚本会为已启用的 UFW/firewalld 放行 TCP 10005，云厂商安全组仍需允许该端口
 - 再次运行同一命令即可更新：保留账户、API Key、管理端修改后的密码与设置；先构建新镜像再切换，等待容器健康检查与管理 API 检查通过；失败时尝试恢复旧编排、实际运行的旧镜像和配置（运行数据库不回滚）
-- 已使用旧版 `deploy.sh` 部署时，执行新脚本会自动迁移到 Compose，并沿用 `/opt/antigravity2api/data`；迁移失败时尝试恢复原容器
+- 已使用旧版 `deploy.sh` 部署时，执行新脚本会自动迁移到 Compose，并将旧容器 `antigravity2api` 更新为 `antigravity-to-api`，沿用 `/opt/antigravity2api/data`；迁移失败时尝试恢复原容器名和配置
 
 部署后的常用编排命令（更新源码与重新构建仍执行 `sudo bash deploy.sh`）：
 
@@ -163,15 +163,15 @@ sudo docker compose -f /opt/antigravity2api/compose.yaml stop
 sudo docker compose -f /opt/antigravity2api/compose.yaml up -d --no-build --pull never
 ```
 
-首次部署完成后，在管理端添加 Google 账户，或执行 `docker exec -it antigravity2api antigravity2api login --code`。服务器出口需要位于 Antigravity 支持的地区，需要代理时在管理端设置。
+首次部署完成后，在管理端添加 Google 账户，或执行 `docker exec -it antigravity-to-api antigravity2api login --code`。服务器出口需要位于 Antigravity 支持的地区，需要代理时在管理端设置。
 
 编排明确以 `/data` 为工作目录，部署脚本自动创建 `data/auth` 与 `data/runtime`，并将容器中的 `AUTH_DIR`、`RUNTIME_DIR` 写为绝对路径；已有自定义目录保留原位置。账户库在启动时固定绝对路径并创建目录，避免后续保存凭据依赖进程的当前目录。
 
 粘贴授权码后若出现 `mkdir auth: no such file or directory`，表示 Google token 交换已完成，但本地账户保存失败；单纯未创建 `auth/` 会由程序自动补齐。检查工作目录与挂载是否失效，更新部署后在管理端点“重新开始”获取新授权码，旧码已经用于 token 交换，不能重复使用。可以先查看容器的实际工作目录与挂载：
 
 ```bash
-sudo docker inspect antigravity2api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
-sudo docker exec -w /data antigravity2api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
+sudo docker inspect antigravity-to-api --format 'Workdir={{.Config.WorkingDir}} Mounts={{json .Mounts}}'
+sudo docker exec -w /data antigravity-to-api sh -c 'pwd -P; readlink /proc/1/cwd; ls -ld /data /data/auth /data/runtime'
 ```
 
 默认配置即可运行，也可以通过环境变量指定部署目录、仓库和分支：
@@ -183,10 +183,10 @@ sudo env DEPLOY_DIR=/opt/antigravity2api REPO_URL=https://github.com/yukaijun200
 #### 使用预构建镜像
 
 ```bash
-docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
+docker run -d --name antigravity-to-api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
 ```
 
-`latest` 指向最新的正式版本，也可以用 `v<版本>` 标签指定版本。镜像的工作目录为 `/data`，`.env`、`auth/` 与 `runtime/` 都保存在挂载的目录中，容器监听 `0.0.0.0:8017`。端口对外开放时设置 `API_KEYS`；从容器外打开管理端需要 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`。账户用管理端的授权码登录、远程配对、`docker exec -it antigravity2api antigravity2api login --code`，或把其他电脑上的 `auth/<邮箱>/` 复制到 `data/auth/`；运行中的服务在 2 秒内载入新账户。
+`latest` 指向最新的正式版本，也可以用 `v<版本>` 标签指定版本。镜像的工作目录为 `/data`，`.env`、`auth/` 与 `runtime/` 都保存在挂载的目录中，容器监听 `0.0.0.0:8017`。端口对外开放时设置 `API_KEYS`；从容器外打开管理端需要 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`。账户用管理端的授权码登录、远程配对、`docker exec -it antigravity-to-api antigravity2api login --code`，或把其他电脑上的 `auth/<邮箱>/` 复制到 `data/auth/`；运行中的服务在 2 秒内载入新账户。
 
 ### 代理
 
